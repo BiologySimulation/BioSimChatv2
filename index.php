@@ -29,6 +29,63 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit;
 }
 
+$MAX_REQUESTS = 5;
+$WINDOW_SECONDS = 600;
+
+$clientIp = null;
+if (!empty($_SERVER['HTTP_CF_CONNECTING_IP'])) {
+    $clientIp = $_SERVER['HTTP_CF_CONNECTING_IP'];
+} elseif (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+    $clientIp = trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0]);
+} else {
+    $clientIp = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+}
+
+$rlDir = __DIR__ . '/rate_limit';
+if (!is_dir($rlDir)) {
+    @mkdir($rlDir, 0755, true);
+}
+$ipKey = sha1($clientIp);
+$rlFile = $rlDir . '/' . $ipKey . '.json';
+
+$now = time();
+$history = [];
+
+$fh = @fopen($rlFile, 'c+');
+if ($fh !== false) {
+    if (@flock($fh, LOCK_EX)) {
+        $contents = stream_get_contents($fh);
+        $decoded = json_decode($contents ?: '[]', true);
+        if (is_array($decoded)) {
+            $history = $decoded;
+        }
+
+        $history = array_values(array_filter($history, function ($ts) use ($now, $WINDOW_SECONDS) {
+            return is_int($ts) && ($ts > $now - $WINDOW_SECONDS);
+        }));
+
+        if (count($history) >= $MAX_REQUESTS) {
+            echo json_encode([
+                'reply'  => 'Too Many Requests',
+                'button' => 'none',
+            ], JSON_UNESCAPED_UNICODE);
+            @flock($fh, LOCK_UN);
+            @fclose($fh);
+            exit;
+        }
+
+        $history[] = $now;
+        ftruncate($fh, 0);
+        rewind($fh);
+        fwrite($fh, json_encode($history));
+        fflush($fh);
+        @flock($fh, LOCK_UN);
+    }
+    @fclose($fh);
+} else {
+}
+
+
 $raw = file_get_contents('php://input');
 if ($raw === false) {
     http_response_code(400);
